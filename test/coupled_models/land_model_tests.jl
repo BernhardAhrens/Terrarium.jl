@@ -41,7 +41,7 @@ using Oceananigans.BoundaryConditions: BoundaryCondition, Flux
         compute_tendencies!(state, land)
         return Array(interior(state.tendencies.saturation_water_ice))[1, 1, end]
     end
-    E = 2.0e-8
+    E = 2.0e-8 # m/s
     dsat_no_ET = top_saturation_tendency(0.0)
     dsat_ET = top_saturation_tendency(E)
     Δz_top = Terrarium.Δzᵃᵃᶜ(1, 1, grid.Nz, grid)
