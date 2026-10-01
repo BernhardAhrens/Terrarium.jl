@@ -95,25 +95,14 @@ function compute_auxiliary!(
     compute_auxiliary!(state, grid, veg.plant_available_water, soil)
 
     # The carbon-cycle chain — carbon dynamics → phenology → photosynthesis → stomatal conductance →
-    # autotrophic respiration — is fused into a single launch. Each stage reads the previous stage's
-    # output within a cell, so the dependency chain resolves without returning to the host.
+    # autotrophic respiration — is fused into a single launch.
     carbon_dynamics = veg.carbon_dynamics
     phenology = veg.phenology
     photosynthesis = veg.photosynthesis
     stomatal_conductance = veg.stomatal_conductance
     autotrophic_respiration = veg.autotrophic_respiration
-    out = filter(
-        v -> v isa Field, auxiliary_fields(
-            state, carbon_dynamics, phenology, photosynthesis,
-            stomatal_conductance, autotrophic_respiration
-        )
-    )
-    # Full fields (no `except`): within a cell the kernel writes `out.foo` and a later stage reads
-    # `fields.foo` — the same `Field` object, so the write is visible to the stages below.
-    fields = get_fields(
-        state, carbon_dynamics, phenology, photosynthesis, stomatal_conductance,
-        autotrophic_respiration, atmos
-    )
+    out = auxiliary_fields(state, carbon_dynamics, phenology, photosynthesis, stomatal_conductance, autotrophic_respiration)
+    fields = get_fields(state, carbon_dynamics, phenology, photosynthesis, stomatal_conductance, autotrophic_respiration, atmos)
     launch!(grid, XY, compute_auxiliary_kernel!, out, fields, veg, constants, atmos)
 
     # Note: vegetation_dynamics compute_auxiliary! does nothing for now
