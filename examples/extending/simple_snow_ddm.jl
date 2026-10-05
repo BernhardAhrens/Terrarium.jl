@@ -56,9 +56,9 @@ import DisplayAs
 end
 #
 Terrarium.variables(model::DegreeDaySnow{NF}) where {NF} = (
-    Terrarium.input(:air_temperature, Terrarium.Atmosphere(XY()), default = NF(0), units = u"°C", desc = "Near-surface air temperature in °C"),
-    Terrarium.input(:snow_fall, Terrarium.Atmosphere(XY()), default = NF(0), units = u"m/s", desc = "snow fall rate in m/s"),
-    Terrarium.prognostic(:snow_storage, Terrarium.Snow(XY()), units = u"m", desc = "Snow water equivalent in m"),
+    Terrarium.input(:air_temperature, XY(), default = NF(0), units = u"°C", desc = "Near-surface air temperature in °C"),
+    Terrarium.input(:snow_fall, XY(), default = NF(0), units = u"m/s", desc = "snow fall rate in m/s"),
+    Terrarium.prognostic(:snow_storage, XY(), units = u"m", desc = "Snow water equivalent in m"),
 )
 
 @kwdef struct SnowModel{NF, Grid <: Terrarium.AbstractGrid{NF}, Pro, Init, TS <: Terrarium.AbstractTimeStepper} <: Terrarium.AbstractModel{NF, Grid}
