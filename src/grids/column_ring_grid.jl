@@ -152,7 +152,7 @@ Converts a `RingGrids.Field` to an Oceananigans `Field`
 using the given `ColumnRingGrid`. Only masked grid points are copied to the Oceananigans field.
 For 2D RingGrids fields, returns a 2D Oceananigans field. For 3D fields, returns a 3D field.
 """
-function Oceananigans.Field(ring_field::RingGrids.AbstractField, grid::ColumnRingGrid; default_value = zero(eltype(ring_field)))
+function Oceananigans.Field(ring_field::RingGrids.AbstractField, grid::ColumnRingGrid; domain = nothing)
     if ndims(ring_field) == 1
         # 2D field (horizontal only): treat the data as a single-column matrix so one masked gather
         # (`data[mask, :]`) serves both the 1D and 2D cases. There's a related Reactant bug that makes this necessary: https://github.com/EnzymeAD/Reactant.jl/issues/3087
@@ -170,7 +170,8 @@ function Oceananigans.Field(ring_field::RingGrids.AbstractField, grid::ColumnRin
     mask = grid.mask.data   # host boolean mask (see note above)
     gathered = data[mask, :]
     values = reshape(gathered, size(gathered, 1), 1, size(gathered, 2))
-    oceananigans_field = Field(grid, dims)
+    loc = VarLocation(dims, domain)
+    oceananigans_field = Field(grid, loc)
     set!(oceananigans_field, values)
     return oceananigans_field
 end
@@ -183,7 +184,7 @@ Converts a `RingGrids.Field` whose last dimension is time to an Oceananigans `Fi
 (horizontal × time) yields a 2D series, a 3D field (horizontal × vertical × time) a 3D series. Additional
 keyword arguments (e.g. `time_indexing = Cyclical()`) are forwarded to the `FieldTimeSeries` constructor.
 """
-function Oceananigans.FieldTimeSeries(ring_field::RingGrids.AbstractField, grid::ColumnRingGrid, times::AbstractVector; kwargs...)
+function Oceananigans.FieldTimeSeries(ring_field::RingGrids.AbstractField, grid::ColumnRingGrid, times::AbstractVector; domain = nothing, kwargs...)
     @assert last(size(ring_field)) == length(times) "Last dimension of RingGrids Field must match the length of `times`"
     arch = architecture(grid)
 
@@ -205,7 +206,8 @@ function Oceananigans.FieldTimeSeries(ring_field::RingGrids.AbstractField, grid:
     mask = grid.mask.data   # host boolean mask (see note above)
     gathered = data[mask, :, :]
     values = reshape(gathered, size(gathered, 1), 1, size(gathered)[2:end]...)
-    oceananigans_fts = FieldTimeSeries(grid, dims, times; kwargs...)
+    loc = VarLocation(dims, domain)
+    oceananigans_fts = FieldTimeSeries(grid, loc, times; kwargs...)
     copyto!(interior(oceananigans_fts), values)
     return oceananigans_fts
 end
