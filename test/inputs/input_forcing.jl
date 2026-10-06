@@ -1,14 +1,15 @@
 module ForcingInputTest
 
 using Terrarium
-using Terrarium: AbstractLandGrid, prognostic, input
+using Terrarium: AbstractGrid, XY, XYZ, prognostic, input
 using Test
 
 DEFAULT_NF = Float32
 
-@kwdef struct TestModel{NF, Grid <: AbstractLandGrid{NF}} <: Terrarium.AbstractModel{NF, Grid}
+@kwdef struct TestModel{NF, Grid <: AbstractGrid{NF}} <: Terrarium.AbstractModel{NF, Grid}
     grid::Grid
     initializer = DefaultInitializer(eltype(grid))
+    timestepper = ForwardEuler(eltype(grid))
 end
 
 Terrarium.variables(model::TestModel) = (
@@ -23,17 +24,13 @@ function Terrarium.compute_tendencies!(state, model::TestModel)
     return state.tendencies.x .= state.F
 end
 
-function Terrarium.timestep!(state, model::TestModel, euler::ForwardEuler, Δt)
-    Terrarium.compute_tendencies!(state, model)
-    return @. state.x += Δt * state.tendencies.x
-end
-
 @testset "Forcing input" begin
     grid = ColumnGrid(CPU(), DEFAULT_NF, ExponentialSpacing())
     model = TestModel(grid)
-    F_in = InputSource(eltype(grid), :F)
+    F = Field(grid, XY())
+    F_in = InputSource(grid, F; name = :F)
     @test isa(F_in, FieldInputSource)
-    integrator = initialize(model, ForwardEuler(eltype(grid)), F_in)
+    integrator = initialize(model, inputs = F_in)
     # check that state variable is defined
     @test hasproperty(integrator.state.inputs, :F)
 end
@@ -44,9 +41,9 @@ end
     t_F = 0:0.1:1
     F = FieldTimeSeries(grid, XY(), t_F)
     F.data .= ones(size(F))
-    F_in = InputSource(; F)
+    F_in = InputSource(F; name = :F)
     @test isa(F_in, FieldTimeSeriesInputSource)
-    integrator = initialize(model, ForwardEuler(eltype(grid)), F_in)
+    integrator = initialize(model, inputs = F_in)
     # check initial values
     @test all(integrator.state.x .≈ 0)
     @test all(integrator.state.F .≈ 1)

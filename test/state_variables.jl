@@ -1,20 +1,21 @@
 using Terrarium
 using Test
 
-using Terrarium: AbstractLandGrid, VarDims, XY, XYZ, prognostic, auxiliary, input, namespace
+using Terrarium: AbstractGrid, VarDims, XY, XYZ, prognostic, auxiliary, input, namespace
 
 DEFAULT_NF = Float32
 
 module StateVariablesTestTypes
 
     using Terrarium
-    using Terrarium: AbstractLandGrid, VarDims, XY, XYZ, prognostic, auxiliary, input, namespace
+    using Terrarium: AbstractGrid, VarDims, XY, XYZ, prognostic, auxiliary, input, namespace
 
     using Test
 
-    @kwdef struct SubModel{NF, Grid <: AbstractLandGrid{NF}} <: Terrarium.AbstractModel{NF, Grid}
+    @kwdef struct SubModel{NF, Grid <: AbstractGrid{NF}} <: Terrarium.AbstractModel{NF, Grid}
         grid::Grid
         initializer = DefaultInitializer(eltype(grid))
+        timestepper = ForwardEuler(eltype(grid))
     end
 
     Terrarium.variables(model::SubModel) = (
@@ -24,10 +25,11 @@ module StateVariablesTestTypes
         input(:forcing, XY()),
     )
 
-    @kwdef struct TestModel{NF, Grid <: AbstractLandGrid{NF}} <: Terrarium.AbstractModel{NF, Grid}
+    @kwdef struct TestModel{NF, Grid <: AbstractGrid{NF}, Sub} <: Terrarium.AbstractModel{NF, Grid}
         grid::Grid
-        submodel = SubModel(; grid)
+        submodel::Sub = SubModel(; grid)
         initializer = DefaultInitializer(eltype(grid))
+        timestepper = ForwardEuler(eltype(grid))
     end
 
     struct TestClosure <: Terrarium.AbstractClosureRelation end
@@ -49,8 +51,8 @@ end
 
 @testset "State variable initialization" begin
     grid = ColumnGrid(CPU(), DEFAULT_NF, ExponentialSpacing(N = 10))
-    model = StateVariablesTestTypes.TestModel(; grid)
-    state = initialize(model)
+    model = StateVariablesTestTypes.TestModel(grid)
+    state = StateVariables(model)
     # Check that all prognostic variables are defined correctly
     @test hasproperty(state, :progvar3D) && isa(state.prognostic.progvar3D, Field{Center, Center, Center})
     @test hasproperty(state, :progvar2D) && isa(state.prognostic.progvar2D, Field{Center, Center, Nothing})
@@ -73,8 +75,8 @@ end
 
 @testset "State variable utilities" begin
     grid = ColumnGrid(CPU(), DEFAULT_NF, ExponentialSpacing(N = 10))
-    model = StateVariablesTestTypes.TestModel(; grid)
-    state = initialize(model)
+    model = StateVariablesTestTypes.TestModel(grid)
+    state = StateVariables(model)
     for input in state.inputs
         set!(input, 1)
     end
@@ -87,7 +89,7 @@ end
     @test all(map(field -> all(field .== 1), state.inputs)) # inputs should not be modified
 
     # test copyto!
-    state2 = initialize(model)
+    state2 = StateVariables(model)
     copyto!(state2, state)
     @test all(map(field -> all(field .== 2), state2.prognostic))
     @test all(map(field -> all(field .== 2), state2.auxiliary))
@@ -99,16 +101,18 @@ end
     @test hasproperty(fields, :progvar3D)
     @test hasproperty(fields, :submodel)
     @test hasproperty(fields.submodel, :auxvar2D)
-    prog_fields = Terrarium.prognostic_fields(state, model)
+    fields = @inferred get_fields(state, model)
+    @test hasproperty(fields, :submodel)
+    prog_fields = @inferred Terrarium.prognostic_fields(state, model)
     @test length(prog_fields) == 3 # note that namespaces are NOT included
     @test hasproperty(prog_fields, :progvar3D)
     @test hasproperty(prog_fields, :cprogvar3D)
     @test hasproperty(prog_fields, :progvar2D)
-    aux_fields = Terrarium.auxiliary_fields(state, model)
+    aux_fields = @inferred Terrarium.auxiliary_fields(state, model)
     @test length(aux_fields) == 2 # note that namespaces are NOT included
     @test hasproperty(aux_fields, :auxvar3D)
     @test hasproperty(aux_fields, :auxvar2D)
-    input_fields = Terrarium.input_fields(state, model)
+    input_fields = @inferred Terrarium.input_fields(state, model)
     @test length(input_fields) == 1 # note that namespaces are NOT included
     @test hasproperty(input_fields, :forcing)
 end

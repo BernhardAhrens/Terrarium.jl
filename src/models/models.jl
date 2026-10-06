@@ -3,13 +3,18 @@
 export SoilModel
 include("soil/soil_model.jl")
 
-export GroundHeatFlux, GeothermalHeatFlux, PrescribedSurfaceTemperature, PrescribedBottomTemperature,
+export SoilHeatFlux, GeothermalHeatFlux, PrescribedSurfaceTemperature, PrescribedBottomTemperature,
     FreeDrainage, ImpermeableBoundary, InfiltrationFlux
 include("soil/soil_model_bcs.jl")
 
-export SoilInitializer, ConstantInitialSoilTemperature, QuasiThermalSteadyState,
-    PiecewiseLinearInitialSoilTemperature, SaturationWaterTable
+export SoilInitializer, ConstantSoilTemperature, QuasiThermalSteadyState,
+    PiecewiseLinearInitialSoilTemperature, SaturationWaterTable, ConstantSaturation
 include("soil/soil_model_init.jl")
+
+# Snow
+
+export SnowModel
+include("snow/snow_model.jl")
 
 # Vegetation
 
@@ -22,12 +27,6 @@ export SurfaceEnergyModel
 include("surface/surface_energy_model.jl")
 
 # Coupled models
-
-export CoupledSoilEnergyModel
-include("coupled/soil_energy_model.jl")
-
-export VegetationSoilModel
-include("coupled/vegetation_soil_model.jl")
 
 export LandModel
 include("coupled/land_model.jl")

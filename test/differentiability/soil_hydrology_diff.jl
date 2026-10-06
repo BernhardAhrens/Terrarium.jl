@@ -6,15 +6,15 @@ using FreezeCurves
 using Statistics
 
 function build_soil_energy_hydrology_model(
-        arch, ::Type{NF}, vertflow = RichardsEq();
+        arch, ::Type{NF}, vertical_flow = RichardsEq();
         porosity = ConstantSoilPorosity(NF),
         hydrology_kwargs...
     ) where {NF}
     grid = ColumnGrid(arch, Float64, ExponentialSpacing(N = 10))
     # initial conditions
     initializer = SoilInitializer(eltype(grid))
-    hydrology = SoilHydrology(eltype(grid), vertflow; hydrology_kwargs...)
-    strat = HomogeneousStratigraphy(eltype(grid); porosity)
+    hydrology = SoilHydrology(eltype(grid), vertical_flow; hydrology_kwargs...)
+    strat = HomogeneousSoilStratigraphy(eltype(grid); porosity)
     soil = SoilEnergyWaterCarbon(eltype(grid); hydrology, strat)
     model = SoilModel(grid; soil, initializer)
     return model
@@ -28,7 +28,7 @@ end
     model = build_soil_energy_hydrology_model(CPU(), Float64; porosity, hydraulic_properties)
     swrc = hydraulic_properties.swrc # θ(ψₘ)
     swrc_inv = inv(swrc) # ψₘ(θ)
-    integrator = initialize(model, ForwardEuler())
+    integrator = initialize(model)
     state = integrator.state
     compute_auxiliary!(state, model)
     dstate = make_zero(state)
@@ -75,7 +75,7 @@ end
     hydraulic_properties = ConstantSoilHydraulics(Float64; swrc, unsat_hydraulic_cond)
     # wrapper function for evaluating hydraulic conductivity
     function eval_hydraulic_cond((por, sat, liq))
-        soil = SoilVolume(porosity = por, saturation = sat, liquid = liq, solid = MineralOrganic())
+        soil = SoilComposition(porosity = por, saturation = sat, liquid = liq, solid = MineralOrganic())
         return Terrarium.hydraulic_conductivity(hydraulic_properties, soil)
     end
 
@@ -89,7 +89,7 @@ end
 @testset "Soil hydrology: compute_auxiliary! RRE" begin
     hydraulic_properties = SoilHydraulicsSURFEX(Float64)
     model = build_soil_energy_hydrology_model(CPU(), Float64; hydraulic_properties)
-    integrator = initialize(model, ForwardEuler())
+    integrator = initialize(model)
     state = integrator.state
     # first run compute_auxiliary! for the full model (needed to compute hydraulic properties)
     compute_auxiliary!(state, model)
@@ -112,7 +112,7 @@ end
 @testset "Soil hydrology: compute_tendencies! RRE" begin
     hydraulic_properties = SoilHydraulicsSURFEX(Float64)
     model = build_soil_energy_hydrology_model(CPU(), Float64; hydraulic_properties)
-    integrator = initialize(model, ForwardEuler())
+    integrator = initialize(model)
     state = integrator.state
     # first run compute_auxiliary! for the full model (needed to compute hydraulic properties)
     compute_auxiliary!(state, model)
@@ -135,14 +135,12 @@ end
 @testset "Soil energy/hydrology model: timestep!" begin
     hydraulic_properties = ConstantSoilHydraulics(Float64)
     model = build_soil_energy_hydrology_model(CPU(), Float64; hydraulic_properties)
-    integrator = initialize(model, ForwardEuler())
-    inputs = integrator.inputs
-    state = integrator.state
-    dstate = make_zero(state)
-    stepper = integrator.timestepper
-    dstepper = make_zero(stepper)
+    integrator = initialize(model)
+    dintegrator = make_zero(integrator)
+    # set a seed for the temperature
+    dintegrator.state.temperature .= 1.0
     Δt = 60.0
-    @time Enzyme.autodiff(set_runtime_activity(Reverse), timestep!, Const, Duplicated(state, dstate), Duplicated(stepper, dstepper), Const(model), Const(inputs), Const(Δt))
-    @test all(isfinite.(dstate.temperature))
-    @test all(isfinite.(dstate.pressure_head))
+    @time Enzyme.autodiff(set_runtime_activity(Reverse), timestep!, Const, Duplicated(integrator, dintegrator), Const(Δt))
+    @test all(isfinite.(dintegrator.state.temperature))
+    @test all(isfinite.(dintegrator.state.pressure_head))
 end

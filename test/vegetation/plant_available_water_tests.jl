@@ -6,23 +6,23 @@ using Test
     # Check variables
     paw = FieldCapacityLimitedPAW()
     vars = Variables(paw)
-    @test hasproperty(vars.auxiliary, :plant_available_water)
-    @test hasproperty(vars.auxiliary, :soil_moisture_limiting_factor)
-    @test hasproperty(vars.inputs, :root_fraction)
+    @test haskey(vars.auxiliary, :plant_available_water)
+    @test haskey(vars.auxiliary, :soil_moisture_limiting_factor)
+    @test haskey(vars.inputs, :root_fraction)
 
     # Initialize state variables
     grid = ColumnGrid(UniformSpacing(Δz = 0.2, N = 10))
     hydraulic_properties = ConstantSoilHydraulics(eltype(grid), unsat_hydraulic_cond = UnsatKLinear(eltype(grid)))
     hydrology = SoilHydrology(eltype(grid); hydraulic_properties)
-    strat = HomogeneousStratigraphy(eltype(grid), porosity = ConstantSoilPorosity(mineral_porosity = 0.5))
+    strat = HomogeneousSoilStratigraphy(eltype(grid), porosity = ConstantSoilPorosity(mineral_porosity = 0.5))
     soil = SoilEnergyWaterCarbon(eltype(grid); hydrology, strat)
     soilvars = Variables(soil)
-    state = initialize(merge(vars, soilvars), grid)
+    state = StateVariables(merge(vars, soilvars), grid)
     set!(state.temperature, 10.0)
 
     # Soil moisture limiting factor
     ## use uniform root distribution
-    Δz = zspacings(get_field_grid(grid), Center(), Center(), Face())
+    Δz = zspacings(ground_domain(grid), Center(), Center(), Face())
     RF = set!(state.root_fraction, Δz / 2)
     ## set PAW to 50% in all layers
     PAW = set!(state.plant_available_water, 0.5)

@@ -6,24 +6,27 @@ General implementation of a 1D column model of soil energy, water, and carbon tr
 Properties:
 $(TYPEDFIELDS)
 """
-@kwdef struct SoilModel{
+@parameterized @kwdef struct SoilModel{
         NF,
-        GridType <: AbstractLandGrid{NF},
-        Soil <: AbstractSoil{NF},
-        Constants <: PhysicalConstants{NF},
+        GridType <: AbstractGrid,
+        Soil <: AbstractSoil,
         Initializer <: AbstractInitializer,
+        Timestepper <: AbstractTimeStepper,
     } <: AbstractSoilModel{NF, GridType}
     "Spatial grid type"
     grid::GridType
 
     "Soil processes"
-    soil::Soil = SoilEnergyWaterCarbon(eltype(grid))
+    @component soil::Soil = SoilEnergyWaterCarbon(eltype(grid))
 
     "Physical constants"
-    constants::Constants = PhysicalConstants(eltype(grid))
+    @component constants::PhysicalConstants{NF} = PhysicalConstants(eltype(grid))
 
     "State variable initializer"
-    initializer::Initializer = DefaultInitializer(eltype(grid))
+    @component initializer::Initializer = DefaultInitializer(eltype(grid))
+
+    "Time stepper: a single `AbstractTimeStepper` (e.g. `ForwardEuler`, `Heun`) or an `IMEX`"
+    @component timestepper::Timestepper = default_timestepper(eltype(grid))
 end
 
 # Model interface methods
@@ -38,6 +41,11 @@ end
 
 function compute_auxiliary!(state, model::SoilModel)
     compute_auxiliary!(state, model.grid, model.soil, model.constants)
+    return nothing
+end
+
+function compute_boundary_conditions!(state, model::SoilModel)
+    compute_boundary_conditions!(state, model.grid, model.soil)
     return nothing
 end
 

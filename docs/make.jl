@@ -1,13 +1,18 @@
 using ArgParse
 using Documenter
+using DocumenterCitations
+using DocumenterInterLinks
 using Literate
-using PlutoStaticHTML
 
 using Terrarium
 
-const NOTEBOOK_DIR = joinpath(dirname(@__DIR__), "examples", "notebooks")
-const EXAMPLE_DIR = joinpath(@__DIR__, "src", "notebooks")
-const EXAMPLE_DIR_RELATIVE = joinpath("notebooks")
+# Generate the Benchmarks page from the stored benchmark results before makedocs runs, so that
+# Documenter sees an ordinary static markdown page. Writes a placeholder if no results exist yet.
+include(joinpath(@__DIR__, "generate_benchmarks_page.jl"))
+
+const EXAMPLES_DIR = joinpath(dirname(@__DIR__), "examples")
+const EXAMPLES_OUTDIR = joinpath(@__DIR__, "src", "examples")
+const EXAMPLES_OUTDIR_RELATIVE = "examples"
 
 s = ArgParseSettings()
 @add_arg_table! s begin
@@ -17,103 +22,247 @@ s = ArgParseSettings()
     "--draft", "-d"
     action = :store_true
     help = "Whether to build docs in draft mode, i.e. skipping execution of examples and doctests"
+    "--skip-examples", "-e"
+    action = :store_true
+    help = "Like --draft but applies only to example scripts"
+    "--check-links", "-c"
+    action = :store_true
+    help = "Check that all external links are functional (`linkcheck=true` in `makedocs`)"
+    "--debug"
+    action = :store_true
+    help = "Enable Documenter.jl debug logging for more detailed output from examples and doctests"
 end
 parsed_args = parse_args(ARGS, s)
 
 IS_LOCAL = parsed_args["local"] || parse(Bool, get(ENV, "LOCALDOCS", "false"))
 IS_DRAFT = parsed_args["draft"] || parse(Bool, get(ENV, "DRAFTDOCS", "false"))
-BUILD_DOCS_NOTEBOOKS = !IS_DRAFT && parse(Bool, get(ENV, "BUILD_DOCS_NOTEBOOKS", "true"))
-if haskey(ENV, "GITHUB_ACTIONS")
+SKIP_EXAMPLES = parsed_args["skip-examples"] || parse(Bool, get(ENV, "SKIP_EXAMPLES", "false"))
+CHECK_LINKS = parsed_args["check-links"] || parse(Bool, get(ENV, "CHECK_LINKS", "false"))
+BUILD_EXAMPLE_DOCS = !IS_DRAFT && !SKIP_EXAMPLES
+if haskey(ENV, "GITHUB_ACTIONS") || parsed_args["debug"]
     ENV["JULIA_DEBUG"] = "Documenter"
 end
 
-# lookup table for all Pluto notebooks to be included
-notebook_lookup = if BUILD_DOCS_NOTEBOOKS
-    Dict(
-        "Model Interface" => "example_model_notebook.md",
-        #    "Differentiating Terrarium" => "differentiate-notebook.md",
-    )
-else
-    Dict()
-end
-
-# notebooks to be build (.jl files)
-notebooks_files = []
-for (title, name) in notebook_lookup
-    push!(notebooks_files, replace(name, ".md" => ".jl"))
-end
+# Literate scripts to be built and included in the docs
+# Each entry should be a Pair: page_title => script_filename
+running_scripts = [
+    "Soil column heat conduction" => "soil_heat_column.jl",
+    "Global soil heat conduction" => "soil_heat_global.jl",
+]
+extending_scripts = [
+    "Simple exponential growth model" => "linear_ode_exp_growth.jl",
+    "Degree-day snow melt model" => "simple_snow_ddm.jl",
+    "Linear heat conduction" => "linear_heat_conduction.jl",
+]
 
 """
-Run all Pluto notebooks (".jl" files) in `NOTEBOOK_DIR`.
+Convert Literate.jl scripts in `indir` to markdown pages in `outdir`.
+The differentiation example is never executed during docs builds (Enzyme compile is
+too slow); the model interface example is executed unless IS_DRAFT is set.
 """
-function build_notebook_doc_pages()
-    println("Building notebooks in $NOTEBOOK_DIR and moving them to $EXAMPLE_DIR")
-    oopts = OutputOptions(; append_build_context = false)
-    output_format = documenter_output
-    bopts = BuildOptions(NOTEBOOK_DIR; output_format)
-    build_notebooks(bopts, notebooks_files, oopts)
-
-    # move to docs/src/notebooks because for some reason that's needed
-    mkpath(EXAMPLE_DIR)
-    for (_, file_name) in notebook_lookup
-        mv(joinpath(NOTEBOOK_DIR, file_name), joinpath(EXAMPLE_DIR, file_name))
+function build_literate_pages!(outdir, indir, scripts; kwargs...)
+    mkpath(outdir)
+    for (_, filename) in scripts
+        ## the differentiation notebook is never auto-executed (Enzyme compile time)
+        should_execute = BUILD_EXAMPLE_DOCS && filename != "differentiating_terrarium.jl"
+        literate_kwargs = Dict{Symbol, Any}(
+            :execute => should_execute,
+            :documenter => true,
+            :flavor => Literate.DocumenterFlavor(),
+        )
+        ## For non-executed scripts, use plain julia code fences so Documenter
+        ## does not attempt to run them as @example blocks.
+        if !should_execute
+            literate_kwargs[:codefence] = "```julia" => "```"
+        end
+        merge!(literate_kwargs, Dict(kwargs))
+        Literate.markdown(
+            joinpath(indir, filename),
+            outdir;
+            literate_kwargs...,
+        )
     end
-
     return nothing
 end
 
-# Build the notebooks; defaults to true.
-if BUILD_DOCS_NOTEBOOKS
-    build_notebook_doc_pages()
+# We'll append the following postamble to the literate examples, to include
+# information about the computing environment used to run them.
+example_postamble = """
+
+# ---
+
+# ### Julia version and environment information
+#
+# This example was executed with the following version of Julia:
+
+using InteractiveUtils: versioninfo
+versioninfo()
+
+# These were the top-level packages installed in the environment:
+
+import Pkg
+Pkg.status()
+"""
+
+# Pages vector for makedocs
+running_example_docpages = Pair{String, String}[]
+extending_example_docpages = Pair{String, String}[]
+
+# Temporary solution: copy input files to src
+@info "Copying input files to $(EXAMPLES_OUTDIR)"
+mkpath(EXAMPLES_OUTDIR)
+cp("inputs", joinpath(EXAMPLES_OUTDIR, "inputs"), force = true)
+
+# Build example pages with Literate.jl
+build_literate_pages!(
+    EXAMPLES_OUTDIR,
+    joinpath(EXAMPLES_DIR, "simulations"),
+    running_scripts;
+    preprocess = content -> content * example_postamble,
+)
+build_literate_pages!(
+    EXAMPLES_OUTDIR,
+    joinpath(EXAMPLES_DIR, "extending"),
+    extending_scripts;
+    preprocess = content -> content * example_postamble,
+
+)
+
+# Add example pages to lists
+for (title, filename) in running_scripts
+    mdfile = replace(filename, ".jl" => ".md")
+    push!(running_example_docpages, "Example: $title" => joinpath(EXAMPLES_OUTDIR_RELATIVE, mdfile))
+end
+for (title, filename) in extending_scripts
+    mdfile = replace(filename, ".jl" => ".md")
+    push!(extending_example_docpages, "Example: $title" => joinpath(EXAMPLES_OUTDIR_RELATIVE, mdfile))
 end
 
-# Dict for makedocs for notebooks to be included
-notebook_docpages = Pair{String, String}[]
-push!(notebook_docpages, "Overview" => "notebooks/examples_overview.md")
-for (title, name) in notebook_lookup
-    push!(notebook_docpages, title => joinpath(EXAMPLE_DIR_RELATIVE, name))
-end
+# Create bibliography
+bib = CitationBibliography(
+    joinpath(@__DIR__, "src", "references.bib");
+    style = :numeric
+)
+
+# Add documentation interlinking
+links = InterLinks(
+    "Oceananigans" => "https://clima.github.io/OceananigansDocumentation/stable/",
+    "KernelAbstractions" => "https://juliagpu.github.io/KernelAbstractions.jl/stable/",
+    "SpeedyWeather" => "https://speedyweather.github.io/SpeedyWeatherDocumentation/stable/",
+    "FreezeCurves" => "https://cryogrid.github.io/FreezeCurves.jl/stable/",
+    "Thermodynamics" => "https://clima.github.io/Thermodynamics.jl/stable/",
+)
+
+# Always have `using Terrarium` available in doctests
+DocMeta.setdocmeta!(Terrarium, :DocTestSetup, :(using Terrarium); recursive = true)
+
 
 makedocs(
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
         ansicolor = true,
         collapselevel = 1,
-        canonical = "https://tum-pik-esm.github.io/Terrarium.jl/stable/",
-        size_threshold = 600_000,
-        # Using MathJax3 since Pluto uses that engine too.
+        repolink = "https://github.com/NumericalEarth/Terrarium.jl",
+        canonical = "https://numericalearth.github.io/Terrarium.jl",
+        assets = ["assets/citations.css"],
+        size_threshold_warn = 500 * 1024, # 500 KiB
+        size_threshold = 3 * 1024^2, # 3 MiB
         mathengine = Documenter.MathJax3(),
-    ),      # in bytes
+    ),
     sitename = "Terrarium.jl",
-    authors = "Brian Groenke, Maximillian Galbrecht, Maha Badri, and Contributors",
+    authors = "Brian Groenke, Maximilian Gelbrecht, Maha Badri, and Contributors",
     modules = [Terrarium],
+    plugins = [bib, links],
     pages = [
         "Home" => "index.md",
-        "Overview" => [
-            "Numerical core" => "overview/numerical_core.md",
-            "Software architecture" => "overview/software_architecture.md",
-            "Mathematical formulation" => "overview/mathematical_formulation.md",
+        "Introduction" => [
+            "Basic concepts" => "introduction/basic_concepts.md",
+            "Numerical core" => "introduction/numerical_core.md",
+            "Mathematical formulation" => "introduction/mathematical_formulation.md",
         ],
-        "Physics" => [
-            "Soil physics" => [
-                "Energy and water balance" => "physics/soil_energy_water.md",
+        "Running Terrarium" => [
+            "Configuring models" => "running/configuring.md",
+            "Initialization" => "running/initialization.md",
+            "Time stepping" => "running/time_stepping.md",
+            "Input sources" => "running/input_sources.md",
+            "Reactant acceleration" => "running/reactant.md",
+            running_example_docpages...,
+        ],
+        "Extending Terrarium" => [
+            "Core interfaces" => "extending/core_interfaces.md",
+            "State variables" => "extending/state_variables.md",
+            "Implementing processes" => "extending/implementing_processes.md",
+            "Coupling processes" => "extending/coupling_processes.md",
+            extending_example_docpages...,
+        ],
+        "Models" => [
+            "Land model" => "models/land_model.md",
+            "Soil model" => "models/soil_model.md",
+            "Snow model" => "models/snow_model.md",
+            "Vegetation model" => "models/vegetation_model.md",
+        ],
+        "Processes" => [
+            "Soil" => [
+                "Overview" => "processes/soil/soil.md",
+                "Stratigraphy" => "processes/soil/soil_stratigraphy.md",
+                "Hydrology" => "processes/soil/soil_hydrology.md",
+                "Energy balance" => "processes/soil/soil_energy.md",
+                "Biogeochemistry" => "processes/soil/soil_biogeochemistry.md",
             ],
-            "Vegetation" => "physics/vegetation.md",
+            "Snow" => [
+                "Overview" => "processes/snow/snow.md",
+                "Parameterizations" => "processes/snow/snow_parameterizations.md",
+                "Energy balance" => "processes/snow/snow_energy.md",
+                "Mass balance" => "processes/snow/snow_mass.md",
+            ],
+            "Vegetation" => [
+                "Overview" => "processes/vegetation/vegetation.md",
+                "Photosynthesis" => "processes/vegetation/photosynthesis.md",
+                "Stomatal conductance" => "processes/vegetation/stomatal_conductance.md",
+                "Plant available water" => "processes/vegetation/plant_available_water.md",
+                "Autotrophic respiration" => "processes/vegetation/autotrophic_respiration.md",
+                "Carbon dynamics" => "processes/vegetation/carbon_dynamics.md",
+                "Vegetation dynamics" => "processes/vegetation/vegetation_dynamics.md",
+                "Phenology" => "processes/vegetation/phenology.md",
+                "Root distribution" => "processes/vegetation/root_distribution.md",
+            ],
+            "Surface hydrology" => [
+                "Overview" => "processes/surface_hydrology/surface_hydrology.md",
+                "Canopy interception" => "processes/surface_hydrology/canopy_interception.md",
+                "Evapotranspiration" => "processes/surface_hydrology/evapotranspiration.md",
+                "Surface runoff" => "processes/surface_hydrology/surface_runoff.md",
+            ],
+            "Surface energy balance" => [
+                "Overview" => "processes/surface_energy/surface_energy_balance.md",
+                "Radiative fluxes" => "processes/surface_energy/radiative_fluxes.md",
+                "Turbulent fluxes" => "processes/surface_energy/turbulent_fluxes.md",
+                "Skin temperature" => "processes/surface_energy/skin_temperature.md",
+                "Albedo and emissivity" => "processes/surface_energy/albedo.md",
+            ],
+            "Coupling to atmosphere" => [
+                "Atmosphere interface" => "processes/atmosphere/atmosphere.md",
+                "Aerodynamics" => "processes/atmosphere/aerodynamics.md",
+            ],
+            "Utilities" => [
+                "Constants" => "processes/utils/physical_constants.md",
+                "Physics" => "processes/utils/physics_utils.md",
+            ],
         ],
-        "Examples" => notebook_docpages,
+        "Numerical solvers" => "solvers/solvers.md",
+        "Benchmarks" => "benchmarks.md",
         "Contributing" => "contributing.md",
-        "API Reference" => "api_reference.md",
+        "Index of API" => "api_index.md",
+        "References" => "references.md",
     ],
+    linkcheck = CHECK_LINKS,
+    warnonly = [:cross_references],
     draft = IS_DRAFT,
 )
 
 deployconfig = Documenter.auto_detect_deploy_system()
 
-# remove gitignore from build files
-# rm(joinpath(@__DIR__, "build", ".gitignore"))
-
 deploydocs(
-    repo = "github.com/TUM-PIK-ESM/Terrarium.jl.git",
+    repo = "github.com/NumericalEarth/Terrarium.jl.git",
     push_preview = true,
     versions = ["v0" => "v^", "v#.#", "dev" => "dev"],
     deploy_config = deployconfig,

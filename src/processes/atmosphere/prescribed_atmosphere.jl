@@ -1,23 +1,24 @@
 """
 Generic type representing the concentration of a particular tracer gas in the atmosphere.
 """
-@kwdef struct TracerGas{name}
-    TracerGas(name::Symbol) = new{name}()
+@kwdef struct TracerGas{NF, name}
+    "Default concentration of the gas"
+    concentration::NF
+
+    TracerGas(name::Symbol, concentration::NF) where {NF} = new{NF, name}(concentration)
 end
 
-Base.nameof(::TracerGas{name}) where {name} = name
+Base.nameof(::TracerGas{NF, name}) where {NF, name} = name
 
-variables(::TracerGas{name}) where {name} = (
-    input(name, XY(), default = default_tracer_conc(Val(name)), units = u"ppm", desc = "Ambient atmospheric $(name) concentration in ppm"),
+variables(gas::TracerGas{NF, name}) where {NF, name} = (
+    input(name, Atmosphere(XY()), default = gas.concentration, units = u"ppm", desc = "Ambient atmospheric $(name) concentration in ppm"),
 )
-
-default_tracer_conc(::Val{:CO2}) = 380 # in ppm
 
 """
 Creates a `TracerGas` for ambient CO2 with concentration prescribed by an input variable with
 the given name.
 """
-AmbientCO2(name = :CO2) = TracerGas(name)
+AmbientCO2(::Type{NF}, name = :CO2) where {NF} = TracerGas(name, NF(380))
 
 """
 Creates a `NamedTuple` from the given tracer gas types.
@@ -48,9 +49,10 @@ struct PrescribedAtmosphere{
         Precip <: AbstractPrecipitation,
         IncomingRad <: AbstractIncomingRadiation,
         Humidity <: AbstractHumidity,
+        Wind <: AbstractWind,
         Aerodynamics <: AbstractAerodynamics,
-        Tracers <: NamedTuple{tracernames, <:Tuple{Vararg{TracerGas}}},
-    } <: AbstractAtmosphere{NF, Precip, IncomingRad, Humidity, Aerodynamics}
+        Gases <: Tuple{Vararg{TracerGas{NF}}},
+    } <: AbstractAtmosphere{NF, Precip, IncomingRad, Humidity, Wind, Aerodynamics}
     "Surface-relative altitude in meters at which the atmospheric forcings are assumed to be applied"
     altitude::NF
 
@@ -66,11 +68,14 @@ struct PrescribedAtmosphere{
     "Specific or relative humidity"
     humidity::Humidity
 
+    "Wind velocity formulation"
+    wind::Wind
+
     "Aerodynamic resistances and drag coefficients"
     aerodynamics::Aerodynamics
 
     "Atmospheric tracer gases"
-    tracers::Tracers
+    tracers::NamedTuple{tracernames, Gases}
 end
 
 function PrescribedAtmosphere(
@@ -80,16 +85,21 @@ function PrescribedAtmosphere(
         precip::AbstractPrecipitation = RainSnow(),
         radiation::AbstractIncomingRadiation = LongShortWaveRadiation(),
         humidity::AbstractHumidity = SpecificHumidity(),
-        aerodynamics::AbstractAerodynamics = ConstantAerodynamics(),
-        tracers::NamedTuple = TracerGases(AmbientCO2()),
+        wind::AbstractWind = Windspeed(),
+        aerodynamics::AbstractAerodynamics = ConstantAerodynamics(NF),
+        tracers::NamedTuple = TracerGases(AmbientCO2(NF)),
     ) where {NF}
-    return PrescribedAtmosphere(altitude, min_windspeed, precip, radiation, humidity, aerodynamics, tracers)
+    return PrescribedAtmosphere(altitude, min_windspeed, precip, radiation, humidity, wind, aerodynamics, tracers)
 end
 
+ParameterEditing.parameters(::PrescribedAtmosphere) = (;)
+
+minimum_windspeed(atmos::PrescribedAtmosphere) = atmos.min_windspeed
+
 variables(atmos::PrescribedAtmosphere{NF}) where {NF} = (
-    input(:air_temperature, XY(), default = NF(10), units = u"°C", desc = "Near-surface air temperature in °C"),
-    input(:air_pressure, XY(), default = NF(101_325), units = u"Pa", desc = "Atmospheric pressure at the surface in Pa"),
-    input(:windspeed, XY(), default = NF(0.1), units = u"m/s", desc = "Wind speed in m/s"),
+    input(:air_temperature, Atmosphere(XY()), default = NF(10), units = u"°C", desc = "Near-surface air temperature in °C"),
+    input(:air_pressure, Atmosphere(XY()), default = NF(101_325), units = u"Pa", desc = "Atmospheric pressure at the surface in Pa"),
+    variables(atmos.wind)...,
     variables(atmos.humidity)...,
     variables(atmos.precip)...,
     variables(atmos.radiation)...,
@@ -107,9 +117,9 @@ variables(atmos::PrescribedAtmosphere{NF}) where {NF} = (
 
 Compute the aerodynamic resistance (inverse conductance) at grid cell `i, j`.
 """
-@inline function aerodynamic_resistance(i, j, grid, fields, atmos::PrescribedAtmosphere)
-    let C = drag_coefficient(i, j, grid, fields, atmos.aerodynamics),
-            Vₐ = max(windspeed(i, j, grid, fields, atmos), 1.0e-6)  # clip windspeed to small value
+@inline function aerodynamic_resistance(i, j, grid, fields, atmos::PrescribedAtmosphere{NF}) where {NF}
+    let C = drag_coefficient(i, j, grid, fields, atmos.aerodynamics)
+        Vₐ = windspeed(i, j, grid, fields, atmos)
         rₐ = 1 / (C * Vₐ)
         return rₐ
     end
@@ -130,16 +140,68 @@ Retrieve or compute the air pressure at the current time step.
 @propagate_inbounds air_pressure(i, j, grid, fields, ::PrescribedAtmosphere) = fields.air_pressure[i, j]
 
 """
-    windspeed(i, j, grid, fields, ::PrescribedAtmosphere)
+    ambient_co2(i, j, grid, fields, ::PrescribedAtmosphere)
+
+Return the current prescribed ambient CO2 concentration level.
+"""
+@propagate_inbounds ambient_co2(i, j, grid, fields, ::PrescribedAtmosphere) = fields.CO2[i, j, end]
+
+"""
+    air_density(i, j, grid, fields, atmos::AbstractAtmosphere, constants::PhysicalConstants)
+
+Compute density (kg m⁻³) of a parcel of air under current atmospheric conditions.
+"""
+@propagate_inbounds function air_density(i, j, grid, fields, atmos::AbstractAtmosphere, constants::PhysicalConstants)
+    Tₐ = air_temperature(i, j, grid, fields, atmos)
+    pₐ = air_pressure(i, j, grid, fields, atmos)
+    qₐ = specific_humidity(i, j, grid, fields, atmos)
+    ρₐ = Thermodynamics.air_density(constants.thermodynamics, celsius_to_kelvin(constants.thermodynamics, Tₐ), pₐ, qₐ)
+    return ρₐ
+end
+
+"""
+    $TYPEDEF
+
+Represents a windspeed as direct input/forcing variable.
+"""
+struct Windspeed <: AbstractWind end
+
+variables(::Windspeed) = (
+    input(:windspeed, Atmosphere(XY()), default = 0.1, units = u"m/s", desc = "Wind speed in m/s"),
+)
+
+"""
+    $TYPEDSIGNATURES
 
 Retrieve or compute the windspeed at the current time step.
 """
-@propagate_inbounds windspeed(i, j, grid, fields, atmos::PrescribedAtmosphere) = max(fields.windspeed[i, j], atmos.min_windspeed)
+@propagate_inbounds windspeed(i, j, grid, fields, atmos::AbstractAtmosphere{NF, PR, IR, HD, Windspeed}) where {NF, PR, IR, HD} = max(fields.windspeed[i, j], minimum_windspeed(atmos))
 
+"""
+    $TYPEDEF
+
+Represents a windspeed given as `u` (east-west) and `v` (south-north) velocity components.
+"""
+struct WindVelocity <: AbstractWind end
+
+variables(::WindVelocity) = (
+    input(:wind_u, Atmosphere(XY()), default = 0.1, units = u"m/s", desc = "Wind velocity u-component in m/s"),
+    input(:wind_v, Atmosphere(XY()), default = 0.1, units = u"m/s", desc = "Wind velocity v-component in m/s"),
+)
+
+@propagate_inbounds windspeed(i, j, grid, fields, atmos::AbstractAtmosphere{NF, PR, IR, HD, WindVelocity}) where {NF, PR, IR, HD} = max(sqrt(fields.wind_u[i, j]^2 + fields.wind_v[i, j]^2), minimum_windspeed(atmos))
+
+
+"""
+    $TYPEDEF
+
+Humidity parameterization in which the near-surface specific humidity [kg/kg] is
+provided directly as an input field.
+"""
 struct SpecificHumidity <: AbstractHumidity end
 
 variables(::SpecificHumidity) = (
-    input(:specific_humidity, XY(), default = 1.0e-3, units = u"kg/kg", desc = "Near-surface specific humidity in kg/kg"),
+    input(:specific_humidity, Atmosphere(XY()), default = 1.0e-3, units = u"kg/kg", desc = "Near-surface specific humidity in kg/kg"),
 )
 
 """
@@ -147,39 +209,32 @@ variables(::SpecificHumidity) = (
 
 Retrieve or compute the specific_humidity at the current time step.
 """
-@propagate_inbounds specific_humidity(i, j, grid, fields, ::AbstractAtmosphere{NF, PR, IR, <:SpecificHumidity}) where {NF, PR, IR} = fields.specific_humidity[i, j]
+@propagate_inbounds specific_humidity(i, j, grid, fields, ::AbstractAtmosphere{NF, PR, IR, SpecificHumidity}) where {NF, PR, IR} = fields.specific_humidity[i, j]
 
 """
     $TYPEDSIGNATURES
 
-Computes the specific humidity (vapor pressure) deficit over a surface at temperature `Ts` from the current atmospheric fields.
+Computes the vapor pressure deficit (VPD) [Pa] at atmospheric reference level given the current atmospheric fields
 """
-@propagate_inbounds function compute_humidity_vpd(i, j, grid, fields, atmos::AbstractAtmosphere, c::PhysicalConstants, Ts = nothing)
-    let Δe = compute_vpd(i, j, grid, fields, atmos, c, Ts),
-            p = air_pressure(i, j, grid, fields, atmos)
-        Δq = vapor_pressure_to_specific_humidity(Δe, p, c.ε)
-        return Δq
-    end
-end
-
-"""
-    $TYPEDSIGNATURES
-
-Computes the vapor pressure deficit over a surface at temperature `Ts` from the current atmospheric fields.
-"""
-@propagate_inbounds function compute_vpd(i, j, grid, fields, atmos::AbstractAtmosphere, c::PhysicalConstants, Ts = nothing)
-    Tair = air_temperature(i, j, grid, fields, atmos)
+@propagate_inbounds function compute_vapor_pressure_deficit(i, j, grid, fields, atmos::AbstractAtmosphere, c::PhysicalConstants)
+    T_air = air_temperature(i, j, grid, fields, atmos)
     q_air = specific_humidity(i, j, grid, fields, atmos)
-    pres = air_pressure(i, j, grid, fields, atmos)
-    Ts = isnothing(Ts) ? Tair : Ts
-    return compute_vpd(c, pres, q_air, Ts)
+    p = air_pressure(i, j, grid, fields, atmos)
+    vpd = vapor_pressure_deficit(c.thermodynamics, T_air, p, q_air)
+    return vpd
 end
 
+"""
+    $TYPEDEF
+
+Precipitation parameterization in which liquid rainfall [m/s] and frozen snowfall [m/s]
+are provided as separate input fields.
+"""
 struct RainSnow <: AbstractPrecipitation end
 
 variables(::RainSnow) = (
-    input(:rainfall, XY(), units = u"m/s", desc = "Liquid precipitation (rainfall) rate"),
-    input(:snowfall, XY(), units = u"m/s", desc = "Frozen precipitation (snowfall) rate"),
+    input(:rainfall, Atmosphere(XY()), units = u"m/s", desc = "Liquid precipitation (rainfall) rate"),
+    input(:snowfall, Atmosphere(XY()), units = u"m/s", desc = "Frozen precipitation (snowfall) rate"),
 )
 
 """
@@ -187,21 +242,28 @@ variables(::RainSnow) = (
 
 Retrieve or compute the liquid precipitation (rainfall) at the current time step.
 """
-@inline rainfall(i, j, grid, fields, ::AbstractAtmosphere{NF, <:RainSnow}) where {NF} = fields.rainfall[i, j]
+@inline rainfall(i, j, grid, fields, ::AbstractAtmosphere{NF, RainSnow}) where {NF} = fields.rainfall[i, j]
 
 """
     snowfall(i, j, grid, fields, ::AbstractAtmosphere{NF, <:RainSnow})
 
 Retrieve or compute the frozen precipitation (snowfall) at the current time step.
 """
-@inline snowfall(i, j, grid, fields, ::AbstractAtmosphere{NF, <:RainSnow}) where {NF} = fields.snowfall[i, j]
+@inline snowfall(i, j, grid, fields, ::AbstractAtmosphere{NF, RainSnow}) where {NF} = fields.snowfall[i, j]
 
+"""
+    $TYPEDEF
+
+Incoming radiation parameterization in which downwelling shortwave [W/m²] and
+longwave [W/m²] radiation are provided as separate input fields, along with daytime
+length [hr].
+"""
 struct LongShortWaveRadiation <: AbstractIncomingRadiation end
 
 variables(::LongShortWaveRadiation) = (
-    input(:surface_shortwave_down, XY(), units = u"W/m^2", desc = "Incoming (downwelling) shortwave solar radiation"),
-    input(:surface_longwave_down, XY(), units = u"W/m^2", desc = "Incoming (downwelling) longwave thermal radiation"),
-    input(:daytime_length, XY(), default = 12, units = u"hr", desc = "Number of daytime hours varying with the season and orbital parameters"),
+    input(:surface_shortwave_down, Atmosphere(XY()), default = 341, units = u"W/m^2", desc = "Incoming (downwelling) shortwave solar radiation"),
+    input(:surface_longwave_down, Atmosphere(XY()), default = 333, units = u"W/m^2", desc = "Incoming (downwelling) longwave thermal radiation"),
+    input(:daytime_length, Atmosphere(XY()), default = 12, units = u"hr", desc = "Number of daytime hours varying with the season and orbital parameters"),
 )
 
 """

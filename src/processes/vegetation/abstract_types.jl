@@ -1,5 +1,10 @@
 # Vegetation component types
 
+"""
+    $TYPEDEF
+
+Base type for coupled vegetation (carbon) processes.
+"""
 abstract type AbstractVegetation{NF} <: AbstractCoupledProcesses{NF} end
 
 # Vegetation process types
@@ -7,7 +12,7 @@ abstract type AbstractVegetation{NF} <: AbstractCoupledProcesses{NF} end
 """
     $TYPEDEF
 
-Base type for photosyntheis schemes.
+Base type for photosynthesis schemes.
 """
 abstract type AbstractPhotosynthesis{NF} <: AbstractProcess{NF} end
 
@@ -83,6 +88,13 @@ dynamics. Implementations compute the local tendency value for `ν` at the given
 function compute_ν_tendency end
 
 """
+    vegetation_area_fraction(i, j, grid, fields, ::AbstractVegetationDynamics)
+
+Return the fraction of the grid cell `i, j` covered by vegetation of any type.
+"""
+function vegetation_area_fraction end
+
+"""
     $TYPEDEF
 
 Base type for vegetation phenology schemes.
@@ -90,10 +102,11 @@ Base type for vegetation phenology schemes.
 abstract type AbstractPhenology{NF} <: AbstractProcess{NF} end
 
 """
-	compute_phenology(i, j, grid, fields, phenol::AbstractPhenology)
+	compute_phenology(i, j, grid, fields, phenol::AbstractPhenology, atmos::AbstractAtmosphere)
 
 Cell-level phenology computation. Implementations return phenology factors
-and derived LAI at the given index `i, j`.
+and derived LAI at the given index `i, j`, using atmospheric inputs (e.g. air temperature)
+where required by the scheme.
 """
 function compute_phenology end
 

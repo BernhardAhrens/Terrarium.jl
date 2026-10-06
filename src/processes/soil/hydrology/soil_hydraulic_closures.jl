@@ -12,30 +12,34 @@ which is here defined in implementations of [`AbstractSoilHydraulics`](@ref).
 @kwdef struct SoilSaturationPressureClosure <: AbstractSoilWaterClosure end
 
 variables(::SoilSaturationPressureClosure) = (
-    auxiliary(:pressure_head, XYZ(), units = u"m", desc = "Total hydraulic pressure head in m water displaced at standard pressure"),
+    auxiliary(:pressure_head, Ground(XYZ()), units = u"m", desc = "Total hydraulic pressure head in m water displaced at standard pressure"),
 )
 
 """
     $TYPEDSIGNATURES
 
 Computes `pressure_head` ``Ψ = ψm + ψz + ψh`` from the current `saturation_water_ice` state.
+
+An optional `runoff` process routes excess water removed from an oversaturated soil surface into the
+runoff-owned `surface_excess_water` pool; without it the excess is discarded.
 """
 function closure!(
         state, grid,
         closure::SoilSaturationPressureClosure,
         hydrology::SoilHydrology{NF, RichardsEq},
         soil::AbstractSoil,
+        runoff::Optional{AbstractSurfaceRunoff} = nothing,
         args...
     ) where {NF}
     # apply saturation correction
-    adjust_saturation_profile!(state, grid, hydrology)
+    adjust_saturation_profile!(state, grid, hydrology, runoff)
     # update water table
     compute_water_table!(state, grid, hydrology)
     # determine pressure head from saturation
     strat = get_stratigraphy(soil)
     bgc = get_biogeochemistry(soil)
     out = (pressure_head = state.pressure_head,)
-    fields = get_fields(state, hydrology, bgc; except = out)
+    fields = get_fields(state, hydrology, strat, bgc; except = out)
     launch!(
         grid, XYZ, saturation_to_pressure_kernel!,
         out, fields, closure, hydrology, strat, bgc
@@ -47,25 +51,28 @@ end
     $TYPEDSIGNATURES
 
 Computes `saturation_water_ice` from the current `pressure_head` state.
+
+See [`closure!`](@ref) for the role of the optional `runoff` process.
 """
 function invclosure!(
         state, grid,
         closure::SoilSaturationPressureClosure,
         hydrology::SoilHydrology{NF, RichardsEq},
         soil::AbstractSoil,
+        runoff::Optional{AbstractSurfaceRunoff} = nothing,
         args...
     ) where {NF}
     strat = get_stratigraphy(soil)
     bgc = get_biogeochemistry(soil)
     out = (saturation_water_ice = state.saturation_water_ice,)
-    fields = get_fields(state, hydrology, bgc; except = out)
+    fields = get_fields(state, hydrology, strat, bgc; except = out)
     # determine saturation from pressure
     launch!(
         grid, XYZ, pressure_to_saturation_kernel!,
         out, fields, closure, hydrology, strat, bgc
     )
     # apply saturation correctionh
-    adjust_saturation_profile!(state, grid, hydrology)
+    adjust_saturation_profile!(state, grid, hydrology, runoff)
     # update water table
     compute_water_table!(state, grid, hydrology)
     return nothing
@@ -78,17 +85,17 @@ end
         strat::AbstractStratigraphy,
         bgc::AbstractSoilBiogeochemistry
     )
-    fgrid = get_field_grid(grid)
+    ground_grid = ground_domain(grid)
     ψ = fields.pressure_head[i, j, k] # assumed given
     # get the elevation (z-coord) of k'th layer and reference (surface)
-    z = znode(i, j, k, fgrid, Center(), Center(), Center())
+    z = znode(i, j, k, ground_grid, Center(), Center(), Center())
     # TODO: we need a more user friendly interface for this...
-    z_ref = znode(i, j, fgrid.Nz + 1, fgrid, Center(), Center(), Face())
+    z_ref = znode(i, j, ground_grid.Nz + 1, ground_grid, Center(), Center(), Face())
     # elevation pressure head
     ψz = z - z_ref
     # compute hydrostatic pressure head assuming impermeable lower boundary
     # TODO: relax this assumption in the future?
-    z₀ = fields.water_table[i, j, 1]
+    z₀ = fields.water_table[i, j, end]
     ψh = max(0, z₀ - z)
     # remove hydrostatic and elevation components
     ψm = ψ - ψh - ψz
@@ -106,21 +113,23 @@ end
         strat::AbstractStratigraphy,
         bgc::AbstractSoilBiogeochemistry
     )
-    fgrid = get_field_grid(grid)
+    ground_grid = ground_domain(grid)
     sat = fields.saturation_water_ice[i, j, k] # assumed given
     # get the elevation (z-coord) of k'th layer and reference (surface)
-    z = znode(i, j, k, fgrid, Center(), Center(), Center())
-    z_ref = znode(i, j, fgrid.Nz + 1, fgrid, Center(), Center(), Face())
+    z = znode(i, j, k, ground_grid, Center(), Center(), Center())
+    z_ref = znode(i, j, ground_grid.Nz + 1, ground_grid, Center(), Center(), Face())
     # get inverse of SWRC
     inv_swrc = inv(get_swrc(hydrology))
     por = porosity(i, j, k, grid, fields, strat, bgc)
+    sat_res = residual_saturation(get_hydraulic_properties(hydrology))
     # compute matric pressure head
-    ψm = inv_swrc(sat * por; θsat = por)
+    ψm = inv_swrc(clamp(sat * por, sat_res, por); θsat = por)
+    @assert_kernel isfinite(ψm) "NaN/infinite matric potential"
     # compute elevation pressure head
     ψz = z - z_ref
     # compute hydrostatic pressure head assuming impermeable lower boundary
     # TODO: can we generalize this for arbitrary lower boundaries?
-    z₀ = fields.water_table[i, j, 1]
+    z₀ = fields.water_table[i, j, end]
     ψh = max(0, z₀ - z)
     # compute total pressure head as sum of ψh + ψm + ψz
     # note that ψh and ψz will cancel out in the saturated zone
@@ -147,3 +156,7 @@ end
     i, j, k = @index(Global, NTuple)
     saturation_to_pressure!(out.pressure_head, i, j, k, grid, fields, closure, args...)
 end
+
+# Default debug hooks
+@inline debughook!(::typeof(pressure_to_saturation_kernel!), out, args...) = checkfinite!(out)
+@inline debughook!(::typeof(saturation_to_pressure_kernel!), out, args...) = checkfinite!(out)

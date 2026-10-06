@@ -38,12 +38,13 @@ Implementations of `AbstractModel` are required to implement, at minimum, three 
 Note that a default implementation of `variables` is provided which automatically collects all
 variables declared by `AbstractProcess`es defined as fields (properties) of `struct`s that subtype `AbstractModel`.
 """
-abstract type AbstractModel{NF, Grid <: AbstractLandGrid{NF}}  end
+abstract type AbstractModel{NF, Grid <: AbstractGrid}  end
 
 # Method interface for AbstractModel and AbstractProcess
 
 """
     variables(model::AbstractModel)
+    variables(process::AbstractProcess)
 
 Return a `Tuple` of `AbstractVariable`s (i.e. `PrognosticVariable`, `AuxiliaryVariable`, etc.)
 defined by the model or process.
@@ -81,6 +82,19 @@ Compute all auxiliary state variables for the given `process` on `grid`. Impleme
 function compute_auxiliary! end
 
 """
+    compute_boundary_conditions!(state, model::AbstractModel)
+
+Compute all internal and external boundary conditions for spatially explicit prognostic and auxiliary variables
+defined on the model. This should typically be invoked *after* `compute_auxiliary!` but *before* `compute_tendencies!`.
+
+    compute_boundary_conditions!(state, grid, process::AbstractProcess, args...)
+
+Compute boundary conditions for all spatially explicit prognostic and auxiliary variables defined by
+the given process on `grid`.
+"""
+function compute_boundary_conditions! end
+
+"""
     compute_tendencies!(state, model::AbstractModel)
 
 Compute tendencies for all prognostic state variables for `model` stored in the given `state`.
@@ -97,8 +111,24 @@ function compute_tendencies! end
 
 # Allow variables to be defined on any type, defaulting to an empty tuple
 variables(::Any) = ()
-# For AbstractCoupledProcesses and AbstractModel types, default to collecting variables on all processes contained therein
-variables(obj::Union{AbstractCoupledProcesses, AbstractModel}) = mapreduce(variables, tuplejoin, processes(obj))
+
+"""
+    variables(obj::Union{AbstractCoupledProcesses, AbstractModel})
+
+Default implementation of [`variables`](@ref) for composite [`AbstractModel`](@ref) and
+[`AbstractCoupledProcesses`](@ref) types that automatically collects all variables from all processes defined
+as properties/fields on the given `obj`.
+"""
+variables(obj::Union{AbstractCoupledProcesses, AbstractModel}) = tuplejoin(fastmap(variables, processes(obj))...)
+
+# Fallback dispatches to make implementing compute_boundary_conditions! optional
+compute_boundary_conditions!(state, ::AbstractModel) = nothing
+compute_boundary_conditions!(state, grid, ::AbstractProcess, args...) = nothing
+
+# Allow dispatch on nothing for process types
+@inline compute_auxiliary!(state, grid, ::Nothing, args...) = nothing
+@inline compute_boundary_conditions!(state, grid, ::Nothing, args...) = nothing
+@inline compute_tendencies!(state, grid, ::Nothing, args...) = nothing
 
 """
     processes(obj::Union{AbstractCoupledProcesses, AbstractModel})
@@ -118,7 +148,7 @@ Note that this is a type-stable, `@generated` function that is compiled for each
 end
 
 """
-    closures(process::AbstractProcess)
+    closures(proc::AbstractProcess)
 
 Return a tuple of `AbstractClosureRelation`s defined by the given processes type.
 Note that this is a type-stable, `@generated` function that is compiled for each argument type.
@@ -135,7 +165,7 @@ Note that this is a type-stable, `@generated` function that is compiled for each
 end
 
 """
-    get_grid(model::AbstractModel)::AbstractLandGrid
+    get_grid(model::AbstractModel)::AbstractGrid
 
 Return the spatial grid associated with the given `model`.
 """
@@ -159,42 +189,105 @@ Return the `PhysicalConstants` associated with the given `model`.
     closure!(state, model::AbstractModel)
 
 Apply all closure relations defined for the given `model`.
-
-    closure!(state, grid, [closure,] process, args...)
-
-Apply the `closure` for `process` with the given `grid` and additional
-implementation-specific `args`. If `closure` is not specified, it is
-automatically inferred from `first(closures(process))`.
 """
 closure!(state, model::AbstractModel) = nothing
-closure!(state, grid, proc::AbstractProcess, args...) = closure!(state, grid, first(closures(proc)), proc, args...)
-closure!(state, grid, closure, ::AbstractProcess, args...) = nothing
+
+"""
+    closure!(state, grid, proc::AbstractProcess, args...)
+
+Apply the forward closure mappings for the process `proc` on the given `grid` with additional implementation-specific `args`
+defined by the coupling interface for the process type. The default implementation calls `invclosure!` with `args` for each
+closure returned by [`closures`](@ref).
+"""
+closure!(state, grid, proc::AbstractProcess, args...) = fastiterate!(closure -> closure!(state, grid, closure, proc, args...), closures(proc))
+
+# Allow dispatch on nothing for absent process components
+closure!(state, grid, ::Nothing, args...) = nothing
+
+"""
+    closure!(state, grid, closure::AbstractClosureRelation, process, args...)
+
+Apply `closure` for `process` on the given `grid` with additional implementation-specific `args`.
+"""
+closure!(state, grid, closure::AbstractClosureRelation, ::AbstractProcess, args...) = nothing
 
 """
     invclosure!(state, model::AbstractModel)
 
 Apply the inverse of all closure relations defined for the given `model`.
-
-    invclosure!(state, grid, [closure,] process, args...)
-
-Apply the `closure` for `process` with the given `grid` and additional
-implementation-specific `args`. If `closure` is not specified, it is
-automatically inferred from `first(closures(process))`.
 """
 invclosure!(state, model::AbstractModel) = nothing
-invclosure!(state, grid, proc::AbstractProcess, args...) = invclosure!(state, grid, first(closures(proc)), proc, args...)
-invclosure!(state, grid, closure, ::AbstractProcess, args...) = nothing
 
 """
-Convenience constructor for all `AbstractModel` types that allows the `grid` to be passed
-as the first positional argument.
+    invclosure!(state, grid, proc::AbstractProcess, args...)    
+
+Apply the inverse closure mappings for the process `proc` on the given `grid` with additional implementation-specific `args`
+defined by the coupling interface for the process type. The default implementation calls `invclosure!` with `args` for each
+closure returned by [`closures`](@ref).
 """
-(::Type{Model})(grid::AbstractLandGrid, args...; kwargs...) where {Model <: AbstractModel} = Model(args...; grid, kwargs...)
+invclosure!(state, grid, proc::AbstractProcess, args...) = fastiterate!(closure -> invclosure!(state, grid, closure, proc, args...), closures(proc))
+
+# Allow dispatch on nothing for absent process components
+invclosure!(state, grid, ::Nothing, args...) = nothing
+
+"""
+    invclosure!(state, grid, closure::AbstractClosureRelation, process::AbstractProcess, args...)
+
+Apply the inverse of `closure` for the process `proc` on the given `grid` with additional implementation-specific `args`
+defined by the coupling interface for the process type.
+"""
+invclosure!(state, grid, closure::AbstractClosureRelation, ::AbstractProcess, args...) = nothing
+
+"""
+    (::Type{Model})(grid::AbstractGrid; kwargs...) where {Model <: AbstractModel}
+
+Convenience constructor for all `AbstractModel` types that accepts `grid` as a positional argument.
+"""
+(::Type{Model})(grid::AbstractGrid; kwargs...) where {Model <: AbstractModel} = Model(; grid, kwargs...)
+
+# Default parameters collection for processes
+function ParameterEditing.parameters(proc::AbstractProcess; kwargs...)
+    proc_params = map(fieldnames(typeof(proc))) do name
+        name => ParameterEditing.parameters(getproperty(proc, name))
+    end
+    nonempty_params = filter(p -> length(p[2]) > 0, proc_params)
+    return ParameterEditing.ParameterTable((; nonempty_params...))
+end
 
 function Base.show(io::IO, model::AbstractModel{NF}) where {NF}
     println(io, "$(nameof(typeof(model))){$NF} on $(architecture(get_grid(model)))")
     for name in propertynames(model)
         print(io, "├── $name:  $(summary(getproperty(model, name)))\n")
     end
-    return
+    return nothing
+end
+
+function Base.show(io::IO, processes::AbstractCoupledProcesses{NF}) where {NF}
+    println(io, "$(nameof(typeof(processes))){$NF}")
+    props = getproperties(processes)
+    println(io, "├── Processes:")
+    for name in keys(props)
+        obj = getproperty(props, name)
+        if isa(obj, AbstractProcess)
+            print(io, "├──── $name:  $(summary(getproperty(props, name)))\n")
+        end
+    end
+    if any(obj -> !isa(obj, AbstractProcess), values(props))
+        println(io, "├── Properties:")
+        for name in keys(props)
+            obj = getproperty(props, name)
+            if !isa(obj, AbstractProcess)
+                print(io, "├──── $name:  $(summary(getproperty(props, name)))\n")
+            end
+        end
+    end
+    return nothing
+end
+
+function Base.show(io::IO, process::AbstractProcess{NF}) where {NF}
+    println(io, "$(nameof(typeof(process))){$NF}")
+    for name in propertynames(process)
+        print(io, "├── $name:  $(summary(getproperty(process, name)))\n")
+    end
+    return nothing
 end

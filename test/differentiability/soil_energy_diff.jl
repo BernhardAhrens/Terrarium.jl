@@ -14,14 +14,10 @@ function build_soil_energy_model(arch, ::Type{NF}) where {NF}
     return model
 end
 
-function mean_soil_temperature_step!(state, timestepper, model, inputs, Δt)
-    timestep!(state, timestepper, model, inputs, Δt)
-    return mean(interior(state.temperature))
-    # TODO: Figure out why this is segfaulting in Enzyme
-    # Answer: Average operator is not type inferrable, see:
-    # https://github.com/CliMA/Oceananigans.jl/issues/4869
-    # Tavg = Field(Average(state.temperature, dims=(1, 2, 3)))
-    # return Tavg[1,1,1]
+function mean_soil_temperature_step!(integrator, Δt)
+
+    timestep!(integrator, Δt)
+    return mean(interior(integrator.state.temperature))
 end
 
 @testset "Soil energy: FreeWater freeze-thaw" begin
@@ -30,11 +26,11 @@ end
     sat = 1.0
     por = 0.5
     Lθ = 3.34e8 * sat * por
-    lwc_grad, = Enzyme.autodiff(Reverse, Terrarium.liquid_water_fraction, Active, Const(FreeWater()), Active(U), Const(Lθ), Const(sat))
+    lwc_grad, = Enzyme.autodiff(Reverse, Terrarium.liquid_water_fraction, Active, Const(FreeWater()), Active(U), Const(Lθ))
     @test lwc_grad[2] ≈ 1 / Lθ
     ## check case where Lθ is zero
     Lθ = 0.0
-    lwc_grad, = Enzyme.autodiff(Reverse, Terrarium.liquid_water_fraction, Active, Const(FreeWater()), Active(U), Const(Lθ), Const(sat))
+    lwc_grad, = Enzyme.autodiff(Reverse, Terrarium.liquid_water_fraction, Active, Const(FreeWater()), Active(U), Const(Lθ))
     @test iszero(lwc_grad[2])
 
     # test energy_to_temperature
@@ -66,12 +62,9 @@ end
 
 @testset "Soil energy model: timestep!" begin
     model = build_soil_energy_model(CPU(), Float64)
-    integrator = initialize(model, ForwardEuler())
-    inputs = integrator.inputs
-    state = integrator.state
-    dstate = make_zero(state)
-    stepper = integrator.timestepper
-    dstepper = make_zero(stepper)
-    @time Enzyme.autodiff(set_runtime_activity(Reverse), mean_soil_temperature_step!, Active, Duplicated(state, dstate), Duplicated(stepper, dstepper), Const(model), Const(integrator.inputs), Const(integrator.timestepper.Δt))
-    @test all(isfinite.(dstate.temperature))
+    integrator = initialize(model)
+    dintegrator = make_zero(integrator)
+    Δt = get_timestepper(integrator.model).Δt
+    @time Enzyme.autodiff(set_runtime_activity(Reverse), mean_soil_temperature_step!, Active, Duplicated(integrator, dintegrator), Const(Δt))
+    @test all(isfinite.(dintegrator.state.temperature))
 end

@@ -1,38 +1,28 @@
-global DEBUG::Bool = haskey(ENV, "TERRARIUM_DEBUG") && ENV["TERRARIUM_DEBUG"] == "true"
-
-"""
-    debug!(debug::Bool)
-
-Enable or disable global debug mode for Terrarium. Debug mode 
-"""
-function debug!(debug::Bool)
-    global DEBUG = debug
-    DEBUG && @warn "Debug mode enabled! Debugging hooks will now be active and performance may be degraded."
-    return DEBUG
-end
+# Return true if debug mode is enabled, false otherwise
+@inline debug_mode() = DEBUG[]
 
 """
     $SIGNATURES
 
-Check whether the given `field` has any `NaN` values using `Diagnostics.hasnan` and raise an error if `NaN`s are detected.
+Check whether the given `field` has any `NaN` or `Inf` values and raise an error if `NaN`s are detected.
 """
-nancheck!(field::AbstractField, name = nothing) = Diagnostics.hasnan(field) && error("Found NaNs in Field $name: $field")
-function nancheck!(nt::NamedTuple)
+checkfinite!(field::AbstractField, name = nothing) = any(!isfinite, parent(field)) && error("Found NaN/Inf values in Field $name: $field")
+function checkfinite!(nt::NamedTuple)
     for key in keys(nt)
-        nancheck!(nt[key], key)
+        checkfinite!(nt[key], key)
     end
-    return
+    return nothing
 end
 
 """
     $SIGNATURES
 
 Provides a "hook" for handling debug calls from relevant callsites. Default implementations for
-`Field` and `NamedTuple` (assumed to be of `Field`s) simply forward to [`nancheck!`](@ref).
+`Field` and `NamedTuple` (assumed to be of `Field`s) simply forward to [`checkfinite!`](@ref).
 """
 @inline debughook!(args...) = nothing
-@inline debughook!(field::AbstractField) = nancheck!(field)
-@inline debughook!(nt::NamedTuple) = nancheck!(nt)
+@inline debughook!(field::AbstractField) = checkfinite!(field)
+@inline debughook!(nt::NamedTuple) = checkfinite!(nt)
 
 """
     $SIGNATURES
@@ -41,7 +31,7 @@ Utility method that forwards `args` to `debughook!` *if and only if debug mode i
 the global variable `DEBUG` which can be toggled by the user facing API [`debug!`](@ref).
 """
 @inline function debugsite!(args...)
-    if DEBUG
+    if debug_mode()
         debughook!(args...)
     end
     return nothing
